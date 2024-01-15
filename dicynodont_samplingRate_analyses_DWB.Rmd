@@ -1,0 +1,520 @@
+---
+title: "Just How Well Sampled Were the Dicynodonts Anyway?"
+author: "DWB"
+output: pdf_document
+---
+
+# How often would we expect ancestors given rates from fossilized-birth-death models?
+
+Instantaneous rates per lineage * million-years:
+ - birth/origination ~= death/extinction = ~0.06
+ - sampling events = 0.259
+
+This is a suspiciously high sampling rate for a terrestrial vertebrate clade. For comparison look at table in Bapst & Hopkins: this is comparable to sampling rate for global record of bryozoans or cephalopods across the Phanerozoic. 
+
+For example, look at the high taxonomic completeness this predicts:
+
+```{r}
+library(paleotree)
+
+qsRate2Comp(q=0.06, r = 0.259)
+```
+
+Nevertheless, to use Foote (1996) equations, we need the per-interval probability of being sampled at least once.
+
+```{r}
+pqsRate2sProb(p=0.06, q=0.06, r = 0.259, int.length = 1)
+```
+
+(Note this is for the default scenario where we are estimating per-interval sampling probability for 1 million year intervals.)
+
+We can then input this value in `probAnc` and calculate the probability of getting indirect ancestors under budding using Foote 1996 equations.
+
+(Why budding? Because its probably the predominant way that speciation among morphotaxa occurred in most groups, and why not dicynodonts?)
+
+```{r}
+probAnc(p = 0.06, q = 0.06, R = 0.22876,
+    mode = "budding",
+    analysis = "indirectDesc", Mmax = 85)
+```
+
+HmmmmmmmMMMMmmmmmmm. This number seems high, as it realistically should never be calculated above 0.5. Foote's approximation isn't working out too hot for the dicynodonts. Maybe the FBD is estimating too high of a sampling rate?
+
+# Calculating Sampling Rates from FAD/LAD Info from the PBDB
+
+## Species-level Data
+
+```{r}
+# species
+searchURL <- url("https://paleobiodb.org/data1.2/taxa/list.txt?taxon_name=dicynodontia&rank=species&taxon_status=accepted&rel=all_children&show=app")
+
+dicynData <- read.csv(file = searchURL)
+```
+
+Yay, data on some dicynodont species. 
+
+For Foote's interval-duration-frequency methods to work (Foote & Raup, 1996; Foote, 1997) then we need to put the intervals into some sort of system where they are of roughly even length. This turns out not to be too tough, just staring at IUGS chronostrat. Each 'unit' of duration is about as long as the longer stages, about 5 million years.
+
+```{r}
+# remove taxa with "" as earliest interval
+dicynData <- dicynData[dicynData$early_interval != "",]
+
+intervals <- c(
+    dicynData$early_interval, dicynData$late_interval)
+unqInt <- unique(intervals)
+
+intTranslateTable <- cbind(
+    sort(unqInt),
+    c( NA, # ""
+    4, # "Anisian"
+    1, # "Capitanian"     
+    5, # "Carnian"
+    2, # "Changhsingian"
+    3, # "Early Triassic" 
+    0, # "Guadalupian"
+    3, # "Induan"
+    4, # "Ladinian"       
+    7, # "Late Triassic"   
+    2, # "Lopingian"
+    4, # "Middle Triassic"
+    6, # "Norian"
+    3, # "Olenekian"
+    7, # "Rhaetian"       
+    9, # "Sinemurian"
+    0, # "Wordian"
+    2  # "Wuchiapingian"
+    ))
+
+# translate intervals to numbers
+dicynData$firstInt <- sapply(dicynData$early_interval,
+    function(x) intTranslateTable[
+        x == intTranslateTable[,1] ,2]
+    )
+
+dicynData$lastInt <- sapply(dicynData$late_interval,
+    function(x) intTranslateTable[
+        x == intTranslateTable[,1] ,2]
+    )
+
+dicynData$lastInt[
+    is.na(dicynData$lastInt)] <- dicynData$firstInt[
+    is.na(dicynData$lastInt)] 
+
+anyNA(dicynData$firstInt)
+anyNA(dicynData$lastInt)
+```
+
+If there are no NAs, we're in business. (NA was used a placeholder for taxa that go extinct in the same interval... or for FADs that are simply unplaceable).
+
+What does the resulting durations look like?
+
+```{r}
+intLengths <- as.numeric(dicynData$lastInt) - as.numeric(dicynData$firstInt)
+table(intLengths)
+#  intLengths
+#   0   1   2 
+# 124  20   3 
+
+hist(intLengths)
+```
+
+Hmm, okay, does it work for FreqRat?
+
+```{r}
+#freqRat
+f1 <- table(intLengths)["0"]
+f2 <- table(intLengths)["1"]
+f3 <- table(intLengths)["2"]
+freqRat <- (f2^2)/(f1 * f3)
+# 1.075 - violates the model assumptions
+```
+
+Nope, returns a probability that exceeds 1. How could that be?
+
+Let's try using the FADs/LADs themselves (mid-point dates from each interval) and fit the continuous-duration model from Foote (1997).
+
+```{r}
+# cont time model
+timeData <- data.frame(
+    FADmean = (dicynData$firstapp_min_ma + dicynData$firstapp_max_ma)/2,
+    LADmean = (dicynData$lastapp_min_ma + dicynData$lastapp_max_ma)/2
+    )
+row.names(timeData) <- dicynData$taxon_name
+
+hist(timeData[,1]-timeData[,2])
+```
+
+Okay, a little more structure than the discrete intervals. So let's fit the model!
+
+```{r}
+likFun <- make_durationFreqCont(timeData)
+optim(parInit(likFun),
+      likFun,
+      lower = parLower(likFun),
+      upper = parUpper(likFun),
+      method = "L-BFGS-B",
+      control = list(maxit = 1000000)
+      )
+
+```
+
+So the maximum-likelihood model says q = 0.17, r = 0.05 Lmy-1.
+
+Would the answer change much if we were looking at genera instead?
+
+## Genera level data
+
+Let's get genera data.
+
+```{r}
+# genera
+
+searchURL <- url("https://paleobiodb.org/data1.2/taxa/list.txt?taxon_name=dicynodontia&rank=genus&taxon_status=accepted&rel=all_children&show=app")
+
+dicynData <- read.csv(file = searchURL)
+
+# remove taxa with "" as earliest interval
+dicynData <- dicynData[dicynData$early_interval != "",]
+
+intervals <- c(
+    dicynData$early_interval, dicynData$late_interval)
+unqInt <- unique(intervals)
+
+intTranslateTable <- cbind(
+    sort(unqInt),
+    c( NA, # ""
+    4, # "Anisian"
+    1, # "Capitanian"     
+    5, # "Carnian"
+    2, # "Changhsingian"
+    3, # "Early Triassic" 
+    0, # "Guadalupian"
+    3, # "Induan"
+    4, # "Ladinian"       
+    7, # "Late Triassic"   
+    2, # "Lopingian"
+    4, # "Middle Triassic"
+    6, # "Norian"
+    3, # "Olenekian"
+    7, # "Rhaetian"       
+    9, # "Sinemurian"
+    0, # "Wordian"
+    2  # "Wuchiapingian"
+    ))
+
+# translate intervals to numbers
+dicynData$firstInt <- sapply(dicynData$early_interval,
+    function(x) intTranslateTable[
+        x == intTranslateTable[,1] ,2]
+    )
+
+dicynData$lastInt <- sapply(dicynData$late_interval,
+    function(x) intTranslateTable[
+        x == intTranslateTable[,1] ,2]
+    )
+
+dicynData$lastInt[
+    is.na(dicynData$lastInt)] <- dicynData$firstInt[
+    is.na(dicynData$lastInt)] 
+
+anyNA(dicynData$firstInt)
+anyNA(dicynData$lastInt)
+```
+
+No NAs? Looks good.
+
+```{r}
+intLengths <- as.numeric(dicynData$lastInt) - as.numeric(dicynData$firstInt)
+table(intLengths)
+#  intLengths
+#   0   1   2 
+# 124  20   3 
+
+hist(intLengths)
+```
+
+Okay...
+
+```{r}
+#freqRat
+f1 <- table(intLengths)["0"]
+f2 <- table(intLengths)["1"]
+f3 <- table(intLengths)["2"]
+freqRat <- (f2^2)/(f1 * f3)
+freqRat
+```
+
+freqRat of 0.8 is pretty high! What does the continuous-duration model say?
+
+```{r}
+# cont time model
+timeData <- data.frame(
+    FADmean = (dicynData$firstapp_min_ma + dicynData$firstapp_max_ma)/2,
+    LADmean = (dicynData$lastapp_min_ma + dicynData$lastapp_max_ma)/2
+    )
+row.names(timeData) <- dicynData$taxon_name
+timeData[,1] >=timeData[,2]
+
+hist(timeData[,1]-timeData[,2])
+```
+
+
+```{r}
+library(paleotree)
+likFun <- make_durationFreqCont(timeData)
+optim(parInit(likFun),
+      likFun,
+      lower = parLower(likFun),
+      upper = parUpper(likFun),
+      method = "L-BFGS-B",
+      control = list(maxit = 1000000)
+      )
+```
+
+So q (ext) = 0.125, r (sampling) = 0.068 Lmy-1. This is pretty close to what we got for species level data from the PBDB, although extinction has come down some.
+
+What happens if we feed these in to get sampling rate, assuming birth rate == death rate?
+
+```{r}
+sRate2sProb(r = 0.06, int.length = 1)
+pqsRate2sProb(p = 0.13, q = 0.13, r = 0.06, int.length = 1)
+```
+
+This R is much smaller than the above R. If we input this into `probAnc` like earlier...
+
+```{r}
+probAnc(p = 0.13, q = 0.13, R = 0.058,
+    mode = "budding",
+    analysis = "indirectDesc", Mmax = 85)
+```
+Well, it's only a little above 0.51. But note that Foote's model involves the use of R, which makes it dependent on the length of intervals in question.
+
+For example, what if we had longer, like 10 million year stages like what we've been applying the freqRat to?
+
+```{r}
+sRate2sProb(r = 0.06, int.length = 10)
+pqsRate2sProb(p = 0.13, q = 0.13, r = 0.06, int.length = 10)
+```
+
+We get much bigger R values. Overall, the discrepancy in the dicynodont sampling rates/probabilities as estimated by different methods seems to reflect a discrepancy suggesting the Permo-triassic stages are about 20 million years long.
+
+```{r}
+sProb2sRate(R = 0.8, int.length = 20)
+sRate2sProb(r = 0.05, int.length = 20)
+```
+
+But those stages definitely aren't 20 million years old. The models just don't have a lot of observables with good data so its noisy. More detailed methods need to be applied, and there may be heterogeneities structuring the data that is further complicating things. PyRate would be good to try.
+
+What if we put these higher, say 10 million year probabilities of sampling a lineage at least once?
+
+```{r}
+probAnc(p = 0.06, q = 0.06, R = 0.45,
+    mode = "budding",
+    analysis = "indirectDesc", Mmax = 85)
+```
+
+Way too high!
+
+## Is it an effect of taxon sub-sampling?
+
+### look at original data, what is sampling rate on those age ranges (uncertainties???)
+
+```{r}
+# cont time model
+#sampledSpec_timeData <- read.csv("Therapsid_Ages_CFK_2023.csv")
+sampledSpec_timeData <- read.table(
+    "~/workspace/Continuous_CharacterTesting/data/Therapsid_Ages_CFK_2023.tsv",
+    header = TRUE)
+#str(sampledSpec_timeData)
+
+timeData_ss <- sampledSpec_timeData[,2:3]
+row.names(timeData_ss) <- dicynData$taxon
+
+# as.numeric(timeData_ss[,1])
+```
+
+Can we calculate sampling rate from this? Are there one-hit taxa? or no?
+
+```{r}
+hist(timeData_ss[,1]-timeData_ss[,2])
+```
+
+Are there any negative values?
+
+```{r}
+sampledSpec_timeData[(timeData_ss[,1]-timeData_ss[,2]) < 0,]
+
+
+```
+No, good.
+
+```{r}
+sum((timeData_ss[,1]-timeData_ss[,2]) == 0)
+```
+
+No one-hits. Ruh-roh. Cannot fit the model!
+
+## Take species list see how many are in PBDB data
+
+Get the list of species they use
+
+```{r}
+sampledSpec_timeData <- read.table(
+    "~/workspace/Continuous_CharacterTesting/data/Therapsid_Ages_CFK_2023.tsv",
+    header = TRUE)
+analyzedSpecies <- sampledSpec_timeData$taxon
+
+# clean analyzed Species
+analyzedSpecies <- sort(sub(pattern = "_", replacement = " ", x = analyzedSpecies))
+```
+
+This is an odd mix of genera and species. So we need to combine both from the PBDB.
+
+```{r}
+# get species-level data from PBDB
+searchURL <- url("https://paleobiodb.org/data1.2/taxa/list.txt?taxon_name=dicynodontia&rank=species&taxon_status=accepted&rel=all_children&show=app")
+dicynDataSpecies <- read.csv(file = searchURL)
+
+# remove bad duplicate D. latericeps
+
+if(any(dicynDataSpecies$orig_no == "56871")){
+   dicynDataSpecies <- dicynDataSpecies[dicynDataSpecies$orig_no != "56871",] 
+}
+
+# get generic level data
+searchURL <- url("https://paleobiodb.org/data1.2/taxa/list.txt?taxon_name=dicynodontia&rank=genus&taxon_status=accepted&rel=all_children&show=app")
+dicynDataGenera <- read.csv(file = searchURL)
+
+# remove NA ages
+dicynDataSpecies <- dicynDataSpecies[!is.na(dicynDataSpecies$firstapp_max_ma),]
+dicynDataGenera <- dicynDataGenera[!is.na(dicynDataGenera$firstapp_max_ma),]
+
+pbdbTaxa <- rbind(dicynDataSpecies, dicynDataGenera) 
+pbdbTaxonNames <- pbdbTaxa$taxon_name
+```
+
+how many matches do we have??
+
+```{r}
+getMatches <- sapply(analyzedSpecies, function(x) 
+    if(any(x == pbdbTaxonNames)){
+        which(x == pbdbTaxonNames)
+    }else{
+        NA
+        }
+    )
+
+typeof(getMatches)
+```
+
+Do any have more than one match?
+
+```{r}
+sum(sapply(getMatches,length) > 1)
+```
+
+No. How many have no matches?
+
+```{r}
+noMatchNames <- analyzedSpecies[is.na(getMatches)]
+length(noMatchNames)
+```
+
+So, the phylogenetic analysis contains `r length(analyzedSpecies)` taxa (species and genera), of which `r length(analyzedSpecies) - sum(is.na(getMatches))` have matches (`r round((length(analyzedSpecies) - sum(is.na(getMatches)))/length(analyzedSpecies),2)` match proportion).
+
+> 01-14-24: So, the phylogenetic analysis contains 116 taxa (species and genera), of which 80 have matches (0.69 match proportion)
+> 
+> This is now old data. We have one fewer matches due to NAs.
+
+Can we get better?
+
+**NOTE DO NOT DO THE FOLLOWING. BROOM NAMED LOTS SPECIES THE SAME SPECIES NAME. WHAT A DAMN NIGHTMARE.**
+
+```{r eval = FALSE, echo = FALSE}
+# greedy matching algorithm
+    # only looks at species names, not trying to resolve every name individually using PBDB
+    # return NA if multiple matches
+
+justPBDBspeciesEpithets <- sapply(strsplit(dicynDataSpecies$taxon_name, split = " "), 
+    function(x) x[2])
+        
+noMatchSpeciesEpithets <- sapply(sapply(noMatchNames, strsplit, split = " "), function(x) x[2])
+
+
+bestMatchSpeciesEpithet<- sapply(noMatchSpeciesEpithets, function(x){
+    out <- NA
+    if(!is.na(x)){
+        matches <- which(x == justPBDBspeciesEpithets)
+        if(length(matches) == 1){
+            out <- which(pbdbTaxonNames == dicynDataSpecies$taxon_name[matches])
+            }
+        }    
+    return(out)
+    }
+    )
+
+getMatches[is.na(getMatches)] <- bestMatchSpeciesEpithet
+
+# now how many matches do we have?
+sum(is.na(getMatches))
+# we got only four additional matches..... three of which are over-matched.
+
+```
+
+### let's get dates from the PBDB for the taxa that do match
+
+Need to construct `timeData`.
+
+```{r}
+matchedPBDBtaxonInfo <- pbdbTaxa[getMatches[!is.na(getMatches)],]
+
+#timeData_4date <- matchedPBDBtaxonInfo[, 
+#    c("firstapp_max_ma", "firstapp_min_ma", "lastapp_max_ma", "lastapp_min_ma")]
+
+timeData <- data.frame(
+    FADmean = (matchedPBDBtaxonInfo$firstapp_min_ma + matchedPBDBtaxonInfo$firstapp_max_ma)/2,
+    LADmean = (matchedPBDBtaxonInfo$lastapp_min_ma + matchedPBDBtaxonInfo$lastapp_max_ma)/2
+    )
+
+str(timeData)
+
+row.names(timeData) <-matchedPBDBtaxonInfo$taxon_name
+
+#matchedPBDBtaxonInfo[duplicated(matchedPBDBtaxonInfo$taxon_name),]
+```
+
+Does it look good?
+
+```{r}
+all(timeData[,1] >=timeData[,2])
+
+hist(timeData[,1]-timeData[,2])
+```
+How many one-hits do we have?
+
+```{r}
+sum(timeData[,1]-timeData[,2] == 0)
+```
+
+That's... okay. That's good.
+
+```{r}
+likFun <- make_durationFreqCont(timeData)
+optim(parInit(likFun),
+      likFun,
+      lower = parLower(likFun),
+      upper = parUpper(likFun),
+      method = "L-BFGS-B",
+      control = list(maxit = 1000000)
+      )
+
+```
+
+What does that mean for completeness?
+
+```{r}
+q_est <- 0.21
+r_est <- 0.12
+
+r_est / (q_est + r_est)
+```
